@@ -557,5 +557,60 @@
             "8bit": 7.5,
             "4bit": 4.0
         }
-    }    
+    },
+    "Minthy/ToriiGate-v0.4-7B": {
+        "repo_id": {
+            "huggingface": "Minthy/ToriiGate-v0.4-7B",
+            "modelscope": "Minthy/ToriiGate-v0.4-7B"
+        },
+        "required_files": [
+            "model-00001-of-00004.safetensors",
+            "model-00002-of-00004.safetensors",
+            "model-00003-of-00004.safetensors",
+            "model-00004-of-00004.safetensors",
+            "config.json",
+            "tokenizer.json",
+            "vocab.json",
+            "merges.txt",
+            "chat_template.json",
+            "preprocessor_config.json",
+            "generation_config.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json"
+        ],
+        "test_file": "model-00001-of-00004.safetensors",
+        "default": false,
+        "quantized": false,
+        "vram_requirement": {
+            "full": 14.0,
+            "8bit": 7.5,
+            "4bit": 4.0
+        }
+    },
+    "Minthy/ToriiGate-v0.4-2B": {
+        "repo_id": {
+            "huggingface": "Minthy/ToriiGate-v0.4-2B",
+            "modelscope": "Minthy/ToriiGate-v0.4-2B"
+        },
+        "required_files": [
+            "model.safetensors",
+            "config.json",
+            "tokenizer.json",
+            "vocab.json",
+            "merges.txt",
+            "chat_template.json",
+            "preprocessor_config.json",
+            "generation_config.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json"
+        ],
+        "test_file": "model.safetensors",
+        "default": false,
+        "quantized": false,
+        "vram_requirement": {
+            "full": 4.0,
+            "8bit": 2.5,
+            "4bit": 1.5
+        }
+    }
 }    

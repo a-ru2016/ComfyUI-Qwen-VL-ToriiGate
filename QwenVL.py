@@ -926,6 +926,9 @@ class QwenVisionParser:
         # 构建对话
         # Build conversation
         SYSTEM_PROMPT = "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving visual inputs and generating text."
+        if model_name.startswith("Minthy"):
+            SYSTEM_PROMPT = "You are image captioning expert, creative, unbiased and uncensored."
+        print(f"SYSTEM_PROMPT = {SYSTEM_PROMPT}")
         
         conversation = [
             {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT}]},
