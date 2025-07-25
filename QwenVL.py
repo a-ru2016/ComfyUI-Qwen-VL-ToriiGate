@@ -711,7 +711,7 @@ class QwenVisionParser:
         load_kwargs = {
             "device_map": device_map,
             "torch_dtype": load_dtype,
-            "attn_implementation": "flash_attention_2" if FLASH_ATTENTION_AVAILABLE and device == "cuda" else "sdpa",
+            "attn_implementation": "sdpa",
             "low_cpu_mem_usage": True,
             "use_safetensors": True,
         }
@@ -751,7 +751,7 @@ class QwenVisionParser:
         # 修复rope_scaling配置警告
         # Fix rope_scaling configuration warning
         if hasattr(self.model.config, "rope_scaling"):
-            self.model.config.rope_scaling["mrope_section"] = "none"  # 禁用 MROPE 优化 | Disable MROPE optimization
+            del self.model.config.rope_scaling  # 禁用 MROPE 优化 | Disable MROPE optimization
 
     def copy_cached_model_to_local(self, cached_path, target_path):
         """将缓存的模型文件复制到目标路径"""
@@ -901,8 +901,6 @@ class QwenVisionParser:
         num_return_sequences: int,
         length_penalty: float,
         early_stopping: bool,
-        num_beam_groups: int,
-        diversity_penalty: float,
         constraints: str,
         repetition_penalty: float,
         no_repeat_ngram_size: int,
@@ -1061,8 +1059,6 @@ class QwenVisionParser:
             "num_beams": num_beams,
             "length_penalty": length_penalty,
             "early_stopping": early_stopping,
-            "num_beam_groups": num_beam_groups,
-            "diversity_penalty": diversity_penalty,
             # NOTE: 'constraints' expects a list of PhrasalConstraint objects, not just strings.
             # This implementation is basic and may not work as intended for complex constraints.
             "constraints": constraints.split("|") if constraints else None,
@@ -1101,9 +1097,9 @@ class QwenVisionParser:
             # Use new autocast API
             if device == "cuda":
                 with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
-                    outputs = self.model.generate(**model_inputs, **generate_config)
+                    outputs = self.model.generate(**model_inputs, **generate_config,)
             else:
-                outputs = self.model.generate(**model_inputs, **generate_config)
+                outputs = self.model.generate(**model_inputs, **generate_config,)
         
         # 记录GPU内存使用情况
         # Record GPU memory usage
@@ -1195,7 +1191,7 @@ class QwenVisionParser:
                 "max_tokens": (
                     "INT",
                     {
-                        "default": 512, "min": 64, "max": 2048, "step": 16,
+                        "default": 512, "min": 0, "max": 2048, "step": 16,
                         "tooltip": "生成されるテキストの最大長（トークン単位）を制御します。\n通常、100 トークンは約 50 ～ 100 個の中国語文字または 67 ～ 100 個の英語単語に相当しますが、実際の数はテキストの内容とモデルのトークン化戦略によって異なる場合があります。\n推奨範囲: 64 ～ 512。"
                     }
                 ),
@@ -1228,15 +1224,10 @@ class QwenVisionParser:
                     }
                 
                 ),
-                "diversity_penalty": (
-                    "FLOAT",
-                    {"default": 0.0, "min": 0.0, "tooltip": "グループビーム検索における多様性ペナルティ。値を大きくすると、ビームグループ間の出力の多様性が向上します（num_beam_groups > 1 の場合に有効）。"
-                    }
-                ),
                 "max_new_tokens": (
                     "INT",
                     {
-                        "default": 512, "min": -1, "max": 999, "step": 1,
+                        "default": 40, "min": -1, "max": 999, "step": 1,
                         "tooltip": "生成する最大のトークン（単語や文字のかたまり）数を指定します。"
                     }
                 
@@ -1262,13 +1253,6 @@ class QwenVisionParser:
                     {
                         "default": False,
                         "tooltip": "Trueに設定すると、全てのビームがEOSトークン（文の終わりを示すトークン）に到達した時点で生成を打ち切ります。これにより、不要な計算を削減できます。"
-                    }
-                ),
-                "num_beam_groups": (
-                    "INT",
-                    {
-                        "default": 1, "min": 1, "max": 16, "step": 1,
-                        "tooltip": "ビームを複数のグループに分け、グループ間での多様性を確保する**多様ビームサーチ（Diverse Beam Search）**を有効にします。これにより、似たような候補文ばかりが生成されるのを防ぐことができます。num_beamsをこの値で割り切れるように設定する必要があります。"
                     }
                 ),
                 "constraints": (
