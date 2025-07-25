@@ -612,5 +612,57 @@
             "8bit": 2.5,
             "4bit": 1.5
         }
+    },
+    "Qwen2.5-VL-7B-Instruct-abliterated": {
+        "repo_id": {
+            "huggingface": "huihui-ai/Qwen2.5-VL-7B-Instruct-abliterated",
+            "modelscope": "huihui-ai/Qwen2.5-VL-7B-Instruct-abliterated"
+        },
+        "required_files": [
+            "model-00001-of-00004.safetensors",
+            "config.json",
+            "tokenizer.json",
+            "vocab.json",
+            "merges.txt",
+            "chat_template.json",
+            "preprocessor_config.json",
+            "generation_config.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json"
+        ],
+        "test_file": "model-00001-of-00004.safetensors",
+        "default": false,
+        "quantized": false,
+        "vram_requirement": {
+            "full": 14.0,
+            "8bit": 7.5,
+            "4bit": 4.0
+        }
+    },
+    "thesby/Qwen2.5-VL-7B-NSFW-Caption-V3": {
+        "repo_id": {
+            "huggingface": "thesby/Qwen2.5-VL-7B-NSFW-Caption-V3",
+            "modelscope": "thesby/Qwen2.5-VL-7B-NSFW-Caption-V3"
+        },
+        "required_files": [
+            "model-00001-of-00005.safetensors",
+            "config.json",
+            "tokenizer.json",
+            "vocab.json",
+            "merges.txt",
+            "chat_template.json",
+            "preprocessor_config.json",
+            "generation_config.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json"
+        ],
+        "test_file": "model-00001-of-00005.safetensors",
+        "default": false,
+        "quantized": false,
+        "vram_requirement": {
+            "full": 14.0,
+            "8bit": 7.5,
+            "4bit": 4.0
+        }
     }
 }    

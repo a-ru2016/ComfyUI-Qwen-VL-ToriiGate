@@ -2,8 +2,11 @@ from __future__ import annotations
 import torch
 import os
 import tempfile
-# import io
 import json
+gc = __import__('gc')
+import random
+import re
+import ast
 from transformers import AutoModelForVision2Seq, AutoProcessor, AutoTokenizer
 from huggingface_hub import snapshot_download
 from modelscope.hub.snapshot_download import snapshot_download as modelscope_snapshot_download
@@ -13,17 +16,15 @@ import folder_paths
 from qwen_vl_utils import process_vision_info
 import numpy as np
 import requests
-import time
+time = __import__('time')
 import torchvision.io
 from transformers import BitsAndBytesConfig
-# 尝试导入opencv作为备选视频处理库
-# Try importing OpenCV as an alternative video processing library
 try:
     import cv2
     OPENCV_AVAILABLE = True
 except ImportError:
     OPENCV_AVAILABLE = False
-    print("警告: OpenCV不可用，视频处理功能可能受限" + " | " + "Warning: OpenCV is not available, video processing functions may be limited")
+    print("Warning: OpenCV is not available, video processing may be limited.")
 
 # 模型注册表JSON文件路径
 # Model registry JSON file path
@@ -454,7 +455,9 @@ class QwenVisionParser:
             self.model = None
             self.processor = None
             self.tokenizer = None
-            torch.cuda.empty_cache()  # 清理GPU缓存 | Clean GPU cache
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()  # 清理GPU缓存 | Clean GPU cache
 
         # 更新设备信息（可选，因为初始化时已设置）
         # Update device information (optional, already set during initialization)
@@ -884,9 +887,46 @@ class QwenVisionParser:
         
 
     @torch.no_grad()
-    def process(self, model_name, quantization, prompt, max_tokens, temperature, top_p,
-                repetition_penalty, image=None, video_path=None, unload_after_generation=True):
+    def process(
+        self,
+        model_name: str,
+        quantization: str,
+        prompt: str,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        num_beams: int,
+        max_new_tokens: int,
+        num_return_sequences: int,
+        length_penalty: float,
+        early_stopping: bool,
+        num_beam_groups: int,
+        diversity_penalty: float,
+        constraints: str,
+        repetition_penalty: float,
+        no_repeat_ngram_size: int,
+        min_length: int,
+        bad_words_ids: str | None,
+        typical_p: float,
+        forced_bos_token_id: int,
+        forced_eos_token_id: int,
+        renormalize_logits: bool,
+        do_sample: bool,
+        seed: int,
+        unload_after_generation: bool = True,
+        image: torch.Tensor | None = None,
+        video_path: str | None = None,
+        **kwargs
+    ):
         start_time = time.time()
+
+        if seed == 0:
+            seed = random.randint(0, 0xffffffffffffffff)
+        
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
         
         # 确保加载正确的模型和量化配置
         # Ensure correct model and quantization configuration are loaded
@@ -953,7 +993,7 @@ class QwenVisionParser:
         
         # 处理用户提示
         # Process user prompt
-        user_prompt = prompt if prompt.endswith(("?", ".", "！", "。", "？", "！")) else f"{prompt} "
+        user_prompt = prompt if prompt.endswith(("", ".", "！", "。", "？", "！")) else f"{prompt} "
         conversation[-1]["content"].append({"type": "text", "text": user_prompt})
         
         # 应用聊天模板
@@ -994,18 +1034,59 @@ class QwenVisionParser:
         if "input_ids" not in model_inputs:
             raise ValueError("处理后的输入不包含'input_ids'键" + " | " + "Processed inputs do not contain 'input_ids' key")
         
+        # BUGFIX: Process forced_eos_token_id into a list or None
+        if forced_eos_token_id is not None:
+            if forced_eos_token_id < 0:
+                forced_eos_token_id_list = None
+            else:
+                forced_eos_token_id_list = [forced_eos_token_id]
+        else:
+            forced_eos_token_id_list = None
+
+        # BUGFIX: Process bad_words_ids string into token IDs
+        processed_bad_words_ids = None
+        if bad_words_ids and self.tokenizer:
+            bad_words_list = bad_words_ids.split("|")
+            if bad_words_list:
+                # Tokenize the words, ensuring not to add special tokens
+                processed_bad_words_ids = self.tokenizer(bad_words_list, add_special_tokens=False).input_ids
+
         # 生成配置
         # Generation configuration
         generate_config = {
-            "max_new_tokens": max(max_tokens, 10),
+            "max_new_tokens": max(max_new_tokens, 10),
             "temperature": temperature,
-            "do_sample": True,
-            "use_cache": True,
             "top_p": top_p,
+            "top_k": top_k,
+            "num_beams": num_beams,
+            "length_penalty": length_penalty,
+            "early_stopping": early_stopping,
+            "num_beam_groups": num_beam_groups,
+            "diversity_penalty": diversity_penalty,
+            # NOTE: 'constraints' expects a list of PhrasalConstraint objects, not just strings.
+            # This implementation is basic and may not work as intended for complex constraints.
+            "constraints": constraints.split("|") if constraints else None,
             "repetition_penalty": repetition_penalty,
             "eos_token_id": self.tokenizer.eos_token_id,
             "pad_token_id": self.tokenizer.pad_token_id,
+            "use_cache": True,
+            "bad_words_ids": processed_bad_words_ids, # BUGFIX: Use processed list of token IDs
+            "no_repeat_ngram_size": no_repeat_ngram_size,
+            "min_length": min_length,
+            "output_scores": True,
+            "return_dict_in_generate": True,
+            "forced_bos_token_id": forced_bos_token_id,
+            "forced_eos_token_id": forced_eos_token_id_list, # BUGFIX: Use the processed list
+            "typical_p": typical_p,
+            "renormalize_logits": renormalize_logits,
         }
+        
+        # 如果使用波束搜索，则禁用采样
+        # If using beam search, disable sampling
+        if num_beams > 1:
+            generate_config["do_sample"] = False
+        else:
+            generate_config["do_sample"] = True
         
         # 记录GPU内存使用情况
         # Record GPU memory usage
@@ -1031,16 +1112,14 @@ class QwenVisionParser:
             print(f"生成后GPU内存使用: {post_forward_memory:.2f} MB" + " | " + f"GPU memory usage after generation: {post_forward_memory:.2f} MB")
             print(f"生成过程中GPU内存增加: {post_forward_memory - pre_forward_memory:.2f} MB" + " | " + f"GPU memory increase during generation: {post_forward_memory - pre_forward_memory:.2f} MB")
         
-        # 处理输出
         # Process outputs
-        text_tokens = outputs if outputs.dim() == 2 else outputs.unsqueeze(0)
+        # When return_dict_in_generate=True, the output is an object. Access the token IDs via the .sequences attribute.
+        text_tokens = outputs.sequences
         
-        # 清理不再需要的大对象
         # Clean up large objects that are no longer needed
         del outputs, inputs
         torch.cuda.empty_cache()
         
-        # 截取新生成的token
         # Trim newly generated tokens
         input_length = model_inputs["input_ids"].shape[1]
         text_tokens = text_tokens[:, input_length:]  # 截取新生成的token | Trim newly generated tokens
@@ -1087,11 +1166,11 @@ class QwenVisionParser:
         return {
             "required": {
                 "model_name": (
-                    list(MODEL_REGISTRY.keys()),  # 动态生成模型选项 | Dynamically generate model options
+                    list(MODEL_REGISTRY.keys()),
                     {
                         "default": next((name for name, info in MODEL_REGISTRY.items() if info.get("default", False)), 
                                        list(MODEL_REGISTRY.keys())[0]),
-                        "tooltip": "Select the available model version." + " | " + "选择可用的模型版本。"
+                        "tooltip": "Select the available model version."
                     }
                 ),
                 "quantization": (
@@ -1110,58 +1189,167 @@ class QwenVisionParser:
                     {
                         "default": "Describe this image in detail.",
                         "multiline": True,
-                        "tooltip": "Enter a text prompt, supporting Chinese and emojis. Example: 'Describe a cat in a painter's style.'" + " | " + "输入文本提示，支持中文和表情符号。示例: '以画家风格描述一只猫。'"
+                        "tooltip": "英語と絵文字に対応したテキストプロンプトを入力してください。例：「画家のスタイルで猫を説明してください。」"
                     }
                 ),
                 "max_tokens": (
                     "INT",
                     {
-                        "default": 512,
-                        "min": 64,
-                        "max": 2048,
-                        "step": 16,
-                        "display": "slider",
-                        "tooltip": "Control the maximum length of the generated text (in tokens). \nGenerally, 100 tokens correspond to approximately 50 - 100 Chinese characters or 67 - 100 English words, but the actual number may vary depending on the text content and the model's tokenization strategy. \nRecommended range: 64 - 512." + " | " + "控制生成文本的最大长度（以token为单位）。\n一般来说，100个token大约对应50 - 100个汉字或67 - 100个英文单词，但实际数量可能因文本内容和模型的分词策略而异。\n推荐范围: 64 - 512。"
+                        "default": 512, "min": 64, "max": 2048, "step": 16,
+                        "tooltip": "生成されるテキストの最大長（トークン単位）を制御します。\n通常、100 トークンは約 50 ～ 100 個の中国語文字または 67 ～ 100 個の英語単語に相当しますが、実際の数はテキストの内容とモデルのトークン化戦略によって異なる場合があります。\n推奨範囲: 64 ～ 512。"
                     }
                 ),
                 "temperature": (
                     "FLOAT",
                     {
-                        "default": 0.4,
-                        "min": 0.1,
-                        "max": 1.0,
-                        "step": 0.1,
-                        "display": "slider",
-                        "tooltip": "Control the generation diversity:\n▫️ 0.1 - 0.3: Generate structured/technical content.\n▫️ 0.5 - 0.7: Balance creativity and logic.\n▫️ 0.8 - 1.0: High degree of freedom (may produce incoherent content)." + " | " + "控制生成多样性:\n▫️ 0.1 - 0.3: 生成结构化/技术性内容。\n▫️ 0.5 - 0.7: 平衡创造性和逻辑性。\n▫️ 0.8 - 1.0: 高度自由（可能产生不连贯内容）。"
+                        "default": 0.4, "min": 0.0, "max": 2.0, "step": 0.01,
+                        "tooltip": "世代の多様性を制御します:\n▫️ 低い (例: 0.2): より決定論的かつ集中的。\n▫️ 高い (例: 0.8): よりランダムかつ創造的。\n num_beamsが2以上で無効になります。"
                     }
                 ),
                 "top_p": (
                     "FLOAT",
                     {
-                        "default": 0.9,
-                        "min": 0.0,
-                        "max": 1.0,
-                        "step": 0.01,
-                        "display": "slider",
-                        "tooltip": "Nucleus sampling threshold:\n▪️ Close to 1.0: Retain more candidate words (more random).\n▪️ 0.5 - 0.8: Balance quality and diversity.\n▪️ Below 0.3: Generate more conservative content." + " | " + "核采样阈值:\n▪️ 接近1.0: 保留更多候选词（更随机）。\n▪️ 0.5 - 0.8: 平衡质量和多样性。\n▪️ 低于0.3: 生成更保守的内容。"
+                        "default": 0.9, "min": 0.0, "max": 1.0, "step": 0.01,
+                        "tooltip": "核サンプリング。トークン選択における累積確率のカットオフ。値が小さいほど、モデルはより保守的になります。\n num_beamsが2以上で無効になります。"
+                    }
+                ),
+                "top_k": (
+                    "INT",
+                    {
+                        "default": 50, "min": 0, "max": 100, "step": 1,
+                        "tooltip": "Top-Kサンプリング。生成時に保持する、最も確率の高い語彙トークンの数。無効にする場合は0。\n num_beamsが2以上で無効になります。"
+                    }
+                ),
+                "num_beams": (
+                    "INT",
+                    {
+                        "default": 1, "min": 1, "max": 16, "step": 1,
+                        "tooltip": "ビーム検索のビーム数。1 はビーム検索がないことを意味します。"
+                    }
+                
+                ),
+                "diversity_penalty": (
+                    "FLOAT",
+                    {"default": 0.0, "min": 0.0, "tooltip": "グループビーム検索における多様性ペナルティ。値を大きくすると、ビームグループ間の出力の多様性が向上します（num_beam_groups > 1 の場合に有効）。"
+                    }
+                ),
+                "max_new_tokens": (
+                    "INT",
+                    {
+                        "default": 512, "min": -1, "max": 999, "step": 1,
+                        "tooltip": "生成する最大のトークン（単語や文字のかたまり）数を指定します。"
+                    }
+                
+                ),
+                "num_return_sequences": (
+                    "INT",
+                    {
+                        "default": 1, "min": 1, "max": 16, "step": 1,
+                        "tooltip": "生成する候補文の数。num_beams以下の値に設定する必要があります。例えば、num_beams=5、num_return_sequences=3とすると、5つの候補（ビーム）を探索し、その中から最もスコアの高い3つの文章を返します。"
+                    }
+                
+                ),
+                "length_penalty": (
+                    "FLOAT",
+                    {
+                        "default": 1.0, "min": 0.0, "max": 5.0, "step": 0.1,
+                        "tooltip": "生成される文章の長さを調整します。1.0が中立です。1.0より大きい値 (例: 1.2) を設定すると長い文章が生成されやすくなり、1.0より小さい値 (例: 0.8) を設定すると短い文章が生成されやすくなります。これは、モデルが短い文を好む傾向を補正するのに役立ちます。"
+                    }
+                
+                ),
+                "early_stopping": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Trueに設定すると、全てのビームがEOSトークン（文の終わりを示すトークン）に到達した時点で生成を打ち切ります。これにより、不要な計算を削減できます。"
+                    }
+                ),
+                "num_beam_groups": (
+                    "INT",
+                    {
+                        "default": 1, "min": 1, "max": 16, "step": 1,
+                        "tooltip": "ビームを複数のグループに分け、グループ間での多様性を確保する**多様ビームサーチ（Diverse Beam Search）**を有効にします。これにより、似たような候補文ばかりが生成されるのを防ぐことができます。num_beamsをこの値で割り切れるように設定する必要があります。"
+                    }
+                ),
+                "constraints": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "tooltip": "生成される文章に含めるべき単語やフレーズを強制するための機能です。より高度な制御が必要な場合に使用します。|を使って区切ります。"
                     }
                 ),
                 "repetition_penalty": (
                     "FLOAT",
                     {
-                        "default": 1.0,
-                        "min": 0.0,
-                        "max": 2.0,
-                        "step": 0.01,
-                        "display": "slider",
-                        "tooltip": "Control of repeated content:\n⚠️ 1.0: Default behavior.\n⚠️ >1.0 (Recommended 1.2): Suppress repeated phrases.\n⚠️ <1.0 (Recommended 0.8): Encourage repeated emphasis." + " | " + "控制重复内容:\n⚠️ 1.0: 默认行为。\n⚠️ >1.0 (推荐1.2): 抑制重复短语。\n⚠️ <1.0 (推荐0.8): 鼓励重复强调。"
+                        "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01,
+                        "tooltip": "トークンの繰り返しに対するペナルティ。1.0 はペナルティがないことを意味します。> 1.0 は繰り返しを抑制します。"
                     }
                 ),
+                "do_sample": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "サンプリングを有効にします。\n▫️ True: `temperature`, `top_p`, `top_k` を使用。\n▫️ False: ビームサーチなど決定論的生成を行います。\n`num_beams=1` の場合は True にするのが一般的です。"
+                    }
+                ),
+                "no_repeat_ngram_size": (
+                    "INT",
+                    {
+                        "default": 0, "min": 0, "max": 10, "step": 1,
+                        "tooltip": "同じ n-gram（連続した単語列）の繰り返しを防ぎます。0で無効。\n例: 3 → “the cat in the” が2回出ないように制限します。"
+                    }
+                ),
+                "min_length": (
+                    "INT",
+                    {
+                        "default": 0, "min": 0, "max": 2048, "step": 1,
+                        "tooltip": "生成されるテキストの最小トークン数を指定します。短すぎる出力を避けたい場合に設定します。"
+                    }
+                ),
+                "bad_words_ids": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "tooltip": "出力に含めたくない単語やフレーズを `|` 区切りで入力します。指定された単語は強制的に生成から除外されます。例: badword1|badword2"
+                    }
+                ),
+                "typical_p": (
+                    "FLOAT",
+                    {
+                        "default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                        "tooltip": "典型性サンプリング。top-pとは異なるアルゴリズムで、より人間らしい出力になることがあります。\n値が小さいほど保守的になります。"
+                    }
+                ),
+                "forced_bos_token_id": (
+                    "INT",
+                    {
+                        "default": -1,
+                        "tooltip": "出力文の最初に強制的に使用するトークン ID を指定します。-1 で無効。多言語モデルや指示文などの生成制御に使います。"
+                    }
+                ),
+                "forced_eos_token_id": (
+                    "INT",
+                    {
+                        "default": -1,
+                        "tooltip": "出力文の最後に強制的に使用するトークン ID を指定します。-1 で無効。文末固定などに使われます。"
+                    }
+                ),
+                "renormalize_logits": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "top-p や top-k の後に softmax を再正規化します。\nこれにより、より理論的に整った確率分布での選択が可能になります。"
+                    }
+                ),
+                "seed": ("INT", {
+                    "default": 0, "min": 0, "max": 0xffffffffffffffff,
+                    "tooltip": "乱数生成のシード。0の場合、ランダムシードが使用されます。"
+                }),
                 "unload_after_generation": (
                     "BOOLEAN",
                     {
                         "default": True,
-                        "tooltip": "Process完成后自动卸载模型以释放资源。如果需要连续处理多个请求，可以禁用此选项以提高性能。" + " | " + "Automatically unload the model after processing to free up resources. If you need to process multiple requests consecutively, you can disable this option to improve performance."
+                        "tooltip": "処理後にモデルを自動的にアンロードし、リソースを解放します。複数のリクエストを連続して処理する必要がある場合は、このオプションを無効にすることでパフォーマンスを向上させることができます。"
                     }
                 )
             },
@@ -1169,13 +1357,13 @@ class QwenVisionParser:
                 "image": (
                     "IMAGE",
                     {
-                        "tooltip": "Upload a reference image (supports PNG/JPG), and the model will adjust the generation result based on the image content." + " | " + "上传参考图像（支持PNG/JPG），模型将根据图像内容调整生成结果。"
+                        "tooltip": "参照画像（PNG/JPG をサポート）をアップロードすると、モデルは画像の内容に基づいて生成結果を調整します。"
                     }
                 ),
                 "video_path": (
                     "VIDEO_PATH",
                     {
-                        "tooltip": "Enter the video file  (supports MP4/WEBM), and the model will extract visual features to assist in generation." + " | " + "输入视频文件路径（支持MP4/WEBM），模型将提取视觉特征辅助生成。"
+                        "tooltip": "ビデオ ファイルのパス (MP4/WEBM をサポート) を入力すると、モデルは視覚的な特徴を抽出し、生成を支援します。"
                     }
                 )
             }
@@ -1184,17 +1372,89 @@ class QwenVisionParser:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("text",)
     FUNCTION = "process"
-    CATEGORY = "🐼QwenVL"    
+    CATEGORY = "🐼QwenVL"
 
+import re
+import torch
 
-# Register the node
-# 注册节点
+import torch
+import re
+
+class QwenVLTextParser:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"text": ("STRING", {}), "image": ("IMAGE", {})}}
+    RETURN_TYPES = ("MASK", "IMAGE", "STRING")
+    RETURN_NAMES = ("MASKS", "CROPPED_IMAGES", "caption")
+    FUNCTION = "parse_text"
+    CATEGORY = "🐼QwenVL"
+    OUTPUT_IS_LIST = (False, True, False)
+
+    def parse_text(self, text: str, image: torch.Tensor):
+        # ComfyUIのIMAGEは通常 (B, H, W, C) なので、処理しやすい (B, C, H, W) に変換
+        image_bchw = image.permute(0, 3, 1, 2)
+        
+        p_num = r"\d+"
+        p_sep = r"\s*,?\s*"
+        single_box_pattern = f"[\\[(]\\s*{p_num}{p_sep}{p_num}{p_sep}{p_num}{p_sep}{p_num}\\s*[\\])]"
+        
+        all_boxes = []
+        matches = re.finditer(single_box_pattern, text)
+        for match in matches:
+            box_string = match.group(0)
+            try:
+                numbers = [int(n) for n in re.findall(r'\d+', box_string)]
+                if len(numbers) == 4:
+                    all_boxes.append(numbers)
+            except (ValueError, TypeError):
+                continue
+        
+        caption = re.sub(single_box_pattern, '', text).strip()
+        caption = ' '.join(caption.split())
+
+        # b, h, w, c を取得
+        b, c, height, width = image_bchw.shape
+
+        if not all_boxes:
+            placeholder_mask = torch.zeros((1, height, width), dtype=torch.float32, device=image.device)
+            # プレースホルダーも (B, H, W, C) 形式で返す
+            placeholder_crop = torch.zeros((1, 64, 64, c), dtype=image.dtype, device=image.device)
+            return (placeholder_mask, [placeholder_crop], caption)
+
+        masks, crops = [], []
+        
+        MIN_SIZE = 4 
+
+        for x1, y1, x2, y2 in all_boxes:
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(width, x2), min(height, y2)
+            
+            if (x2 - x1) < MIN_SIZE or (y2 - y1) < MIN_SIZE:
+                continue
+
+            mask = torch.zeros((height, width), dtype=torch.float32, device=image.device)
+            mask[y1:y2, x1:x2] = 1.0
+            masks.append(mask)
+
+            # (B, C, H, W) 形式のテンソルからクロップ
+            crop_bchw = image_bchw[0, :, y1:y2, x1:x2]
+            # (C, H, W) -> (1, C, H, W) -> (1, H, W, C) に変換してリストに追加
+            crop_bhwc = crop_bchw.unsqueeze(0).permute(0, 2, 3, 1)
+            crops.append(crop_bhwc)
+
+        if not masks:
+            placeholder_mask = torch.zeros((1, height, width), dtype=torch.float32, device=image.device)
+            # プレースホルダーも (B, H, W, C) 形式で返す
+            placeholder_crop = torch.zeros((1, 64, 64, c), dtype=image.dtype, device=image.device)
+            return (placeholder_mask, [placeholder_crop], caption)
+        
+        return (torch.stack(masks), crops, caption)
+
 NODE_CLASS_MAPPINGS = {
-    "QwenVisionParser": QwenVisionParser
+    "QwenVisionParser": QwenVisionParser,
+    "QwenVLTextParser": QwenVLTextParser
 }
-
-# 节点显示名称映射
-# Node display name mappings
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "QwenVisionParser": "Qwen VL 🐼"
+    "QwenVisionParser": "Qwen VL 🐼",
+    "QwenVLTextParser": "Qwen VL Text Parser 🐼"
 }
