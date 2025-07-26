@@ -7,7 +7,7 @@ gc = __import__('gc')
 import random
 import re
 import ast
-from transformers import AutoModelForVision2Seq, AutoProcessor, AutoTokenizer
+from transformers import AutoModelForVision2Seq, AutoProcessor, AutoTokenizer, PhrasalConstraint
 from huggingface_hub import snapshot_download
 from modelscope.hub.snapshot_download import snapshot_download as modelscope_snapshot_download
 from PIL import Image
@@ -152,24 +152,6 @@ def get_device_info():
             device_info["warning_message"] = "NVIDIA GPU显存不足，可能会使用系统内存，性能会下降" + " | " + "Insufficient VRAM for NVIDIA GPU, system memory may be used, performance will degrade"
             device_info["recommended_device"] = "cuda"  # 仍推荐使用GPU，但会启用内存优化 | Still recommended to use GPU with memory optimization enabled
         return device_info
-    
-    # 检查是否有AMD GPU (ROCm)
-    # Check if there's an AMD GPU (ROCm)
-    try:
-        import torch
-        if hasattr(torch, 'device') and torch.device('cuda' if torch.cuda.is_available() else 'cpu').type == 'cuda':
-            device_info["device_type"] = "amd_gpu"
-            # AMD GPU内存检查
-            # AMD GPU memory check
-            if device_info["gpu"]["total_memory"] >= 8:
-                device_info["recommended_device"] = "cuda"
-            else:
-                device_info["memory_sufficient"] = False
-                device_info["warning_message"] = "AMD GPU显存不足，可能会使用系统内存，性能会下降" + " | " + "Insufficient VRAM for AMD GPU, system memory may be used, performance will degrade"
-                device_info["recommended_device"] = "cuda"
-            return device_info
-    except:
-        pass
     
     # 默认为CPU
     # Default to CPU
@@ -892,7 +874,6 @@ class QwenVisionParser:
         model_name: str,
         quantization: str,
         prompt: str,
-        max_tokens: int,
         temperature: float,
         top_p: float,
         top_k: int,
@@ -1048,6 +1029,16 @@ class QwenVisionParser:
             if bad_words_list:
                 # Tokenize the words, ensuring not to add special tokens
                 processed_bad_words_ids = self.tokenizer(bad_words_list, add_special_tokens=False).input_ids
+        processed_constraints = None
+        # ビームサーチが有効な場合（num_beams > 1）にのみ制約を処理する
+        if num_beams > 1 and constraints:
+            constraint_phrases = constraints.split("|")
+            try:
+                # 各制約フレーズをトークン化し、PhrasalConstraintオブジェクトを作成
+                processed_constraints = [PhrasalConstraint(self.tokenizer(phrase, add_special_tokens=False).input_ids) for phrase in constraint_phrases if phrase.strip()]
+            except Exception as e:
+                print(f"制約の処理中にエラーが発生しました: {e}. 制約を無視します。" + " | " + f"Error processing constraints: {e}. Ignoring constraints.")
+                processed_constraints = None
 
         # 生成配置
         # Generation configuration
@@ -1061,7 +1052,7 @@ class QwenVisionParser:
             "early_stopping": early_stopping,
             # NOTE: 'constraints' expects a list of PhrasalConstraint objects, not just strings.
             # This implementation is basic and may not work as intended for complex constraints.
-            "constraints": constraints.split("|") if constraints else None,
+            "constraints": processed_constraints,
             "repetition_penalty": repetition_penalty,
             "eos_token_id": self.tokenizer.eos_token_id,
             "pad_token_id": self.tokenizer.pad_token_id,
@@ -1075,14 +1066,14 @@ class QwenVisionParser:
             "forced_eos_token_id": forced_eos_token_id_list, # BUGFIX: Use the processed list
             "typical_p": typical_p,
             "renormalize_logits": renormalize_logits,
+            "num_return_sequences": num_return_sequences,
+            "do_sample": do_sample,
         }
         
         # 如果使用波束搜索，则禁用采样
         # If using beam search, disable sampling
         if num_beams > 1:
             generate_config["do_sample"] = False
-        else:
-            generate_config["do_sample"] = True
         
         # 记录GPU内存使用情况
         # Record GPU memory usage
@@ -1186,13 +1177,6 @@ class QwenVisionParser:
                         "default": "Describe this image in detail.",
                         "multiline": True,
                         "tooltip": "英語と絵文字に対応したテキストプロンプトを入力してください。例：「画家のスタイルで猫を説明してください。」"
-                    }
-                ),
-                "max_tokens": (
-                    "INT",
-                    {
-                        "default": 512, "min": 0, "max": 2048, "step": 16,
-                        "tooltip": "生成されるテキストの最大長（トークン単位）を制御します。\n通常、100 トークンは約 50 ～ 100 個の中国語文字または 67 ～ 100 個の英語単語に相当しますが、実際の数はテキストの内容とモデルのトークン化戦略によって異なる場合があります。\n推奨範囲: 64 ～ 512。"
                     }
                 ),
                 "temperature": (
@@ -1358,11 +1342,6 @@ class QwenVisionParser:
     FUNCTION = "process"
     CATEGORY = "🐼QwenVL"
 
-import re
-import torch
-
-import torch
-import re
 
 class QwenVLTextParser:
     @classmethod
@@ -1383,13 +1362,17 @@ class QwenVLTextParser:
         single_box_pattern = f"[\\[(]\\s*{p_num}{p_sep}{p_num}{p_sep}{p_num}{p_sep}{p_num}\\s*[\\])]"
         
         all_boxes = []
+        seen_boxes = set()
         matches = re.finditer(single_box_pattern, text)
         for match in matches:
             box_string = match.group(0)
             try:
                 numbers = [int(n) for n in re.findall(r'\d+', box_string)]
                 if len(numbers) == 4:
-                    all_boxes.append(numbers)
+                    box_tuple = tuple(numbers)
+                    if box_tuple not in seen_boxes:
+                        all_boxes.append(numbers)
+                        seen_boxes.add(box_tuple)
             except (ValueError, TypeError):
                 continue
         
