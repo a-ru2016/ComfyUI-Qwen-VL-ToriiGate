@@ -1211,7 +1211,7 @@ class QwenVisionParser:
                 "max_new_tokens": (
                     "INT",
                     {
-                        "default": 40, "min": -1, "max": 999, "step": 1,
+                        "default": 512, "min": 0, "max": 2048, "step": 16,
                         "tooltip": "生成する最大のトークン（単語や文字のかたまり）数を指定します。"
                     }
                 
@@ -1343,53 +1343,102 @@ class QwenVisionParser:
     CATEGORY = "🐼QwenVL"
 
 
+import re
+import torch
+
+import re
+import torch
+
+import re
+import torch
+
+import re
+import torch
+
 class QwenVLTextParser:
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {"text": ("STRING", {}), "image": ("IMAGE", {})}}
-    RETURN_TYPES = ("MASK", "IMAGE", "STRING")
-    RETURN_NAMES = ("MASKS", "CROPPED_IMAGES", "caption")
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True}),
+                "image": ("IMAGE", {})
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "IMAGE")
+    RETURN_NAMES = ("caption", "element_names", "cropped_images")
     FUNCTION = "parse_text"
     CATEGORY = "🐼QwenVL"
-    OUTPUT_IS_LIST = (False, True, False)
+    OUTPUT_IS_LIST = (False, True, True)
 
     def parse_text(self, text: str, image: torch.Tensor):
-        # ComfyUIのIMAGEは通常 (B, H, W, C) なので、処理しやすい (B, C, H, W) に変換
+        # 画像の前処理 (B, H, W, C) -> (B, C, H, W)
         image_bchw = image.permute(0, 3, 1, 2)
-        
-        p_num = r"\d+"
-        p_sep = r"\s*,?\s*"
-        single_box_pattern = f"[\\[(]\\s*{p_num}{p_sep}{p_num}{p_sep}{p_num}{p_sep}{p_num}\\s*[\\])]"
-        
-        all_boxes = []
-        seen_boxes = set()
-        matches = re.finditer(single_box_pattern, text)
-        for match in matches:
-            box_string = match.group(0)
-            try:
-                numbers = [int(n) for n in re.findall(r'\d+', box_string)]
-                if len(numbers) == 4:
-                    box_tuple = tuple(numbers)
-                    if box_tuple not in seen_boxes:
-                        all_boxes.append(numbers)
-                        seen_boxes.add(box_tuple)
-            except (ValueError, TypeError):
-                continue
-        
-        caption = re.sub(single_box_pattern, '', text).strip()
-        caption = ' '.join(caption.split())
-
-        # b, h, w, c を取得
         b, c, height, width = image_bchw.shape
+        
+        # --- パース処理の改善 ---
+        
+        # 1. テキストを「キャプション」と「バウンディングボックス」のセクションに分割
+        parts = re.split(r'\*\*Bounding Boxes\*\*:', text, maxsplit=1, flags=re.IGNORECASE)
+        
+        # 2. キャプションの抽出
+        caption_text = parts[0]
+        caption = re.sub(r'^\*\*Caption\*\*:', '', caption_text, flags=re.IGNORECASE).strip()
+        if not caption:
+            caption = "No caption found."
+
+        all_boxes = []
+        element_names = []
+
+        # 3. バウンディングボックスの抽出
+        if len(parts) > 1:
+            boxes_text = parts[1]
+            
+            # 1行に複数の座標がある場合(例: `[...],[...]`)、改行で分割して処理しやすくする
+            processed_text = boxes_text.replace('],[', ']\n[')
+
+            # 座標部分 `[num, num, num, num]` を見つけるための正規表現
+            coord_pattern = re.compile(r'\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]')
+            
+            box_counter = 0
+            for line in processed_text.strip().split('\n'):
+                line = line.strip()
+                if not line:
+                    continue
+
+                # まず行の中から座標を見つける
+                coord_match = coord_pattern.search(line)
+                if coord_match:
+                    try:
+                        # 座標を抽出
+                        coords = [int(n) for n in coord_match.groups()]
+                        all_boxes.append(coords)
+                        box_counter += 1
+
+                        # 次に、座標部分を元の行から取り除き、残りを名前候補とする
+                        coord_full_str = coord_match.group(0) # 例: "[407, 155, 769, 998]"
+                        remaining_text = line.replace(coord_full_str, '').strip()
+                        
+                        # 残ったテキストから不要な記号（番号、コロン、ハイフン、**）を削除して名前を整形
+                        name = re.sub(r"^\d+\.\s*|\s*[:\-]\s*|^\*\*|\*\*$|^-", "", remaining_text).strip().strip('*')
+
+                        if name:
+                            element_names.append(name)
+                        else:
+                            # 名前が残らなかった場合は、汎用的な名前を割り当てる
+                            element_names.append(f"element_{box_counter}")
+
+                    except (ValueError, IndexError):
+                        # 予期せぬエラーはスキップ
+                        continue
+
+        # ----- 以下、クロップ処理 (変更なし) -----
 
         if not all_boxes:
-            placeholder_mask = torch.zeros((1, height, width), dtype=torch.float32, device=image.device)
-            # プレースホルダーも (B, H, W, C) 形式で返す
             placeholder_crop = torch.zeros((1, 64, 64, c), dtype=image.dtype, device=image.device)
-            return (placeholder_mask, [placeholder_crop], caption)
+            return (caption, [], [placeholder_crop])
 
-        masks, crops = [], []
-        
+        crops = []
         MIN_SIZE = 4 
 
         for x1, y1, x2, y2 in all_boxes:
@@ -1399,23 +1448,15 @@ class QwenVLTextParser:
             if (x2 - x1) < MIN_SIZE or (y2 - y1) < MIN_SIZE:
                 continue
 
-            mask = torch.zeros((height, width), dtype=torch.float32, device=image.device)
-            mask[y1:y2, x1:x2] = 1.0
-            masks.append(mask)
-
-            # (B, C, H, W) 形式のテンソルからクロップ
             crop_bchw = image_bchw[0, :, y1:y2, x1:x2]
-            # (C, H, W) -> (1, C, H, W) -> (1, H, W, C) に変換してリストに追加
             crop_bhwc = crop_bchw.unsqueeze(0).permute(0, 2, 3, 1)
             crops.append(crop_bhwc)
 
-        if not masks:
-            placeholder_mask = torch.zeros((1, height, width), dtype=torch.float32, device=image.device)
-            # プレースホルダーも (B, H, W, C) 形式で返す
+        if not crops:
             placeholder_crop = torch.zeros((1, 64, 64, c), dtype=image.dtype, device=image.device)
-            return (placeholder_mask, [placeholder_crop], caption)
+            return (caption, [], [placeholder_crop])
         
-        return (torch.stack(masks), crops, caption)
+        return (caption, element_names, crops)
 
 NODE_CLASS_MAPPINGS = {
     "QwenVisionParser": QwenVisionParser,
